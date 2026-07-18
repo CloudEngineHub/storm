@@ -102,7 +102,18 @@ if __name__ == "__main__":
         print("No issues found for the specified milestone.", file=sys.stderr)
         sys.exit(1)
 
-    unresolved_issues = [issue for issue in issues if issue["state"] != "closed"]
+    def is_truly_open(issue):
+        if issue["state"] == "closed":
+            return False
+        # Re-fetch the issue directly to guard against stale index returning issues
+        # whose milestone was already removed (known GitHub API inconsistency)
+        url = f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/issues/{issue['number']}"
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200:
+            return True  # conservative: treat as unresolved if we can't verify
+        return r.json().get("milestone") is not None
+
+    unresolved_issues = [issue for issue in issues if is_truly_open(issue)]
     if unresolved_issues:
         print("The release is not completed since unresolved issues were found:", file=sys.stderr)
         for issue in unresolved_issues:
