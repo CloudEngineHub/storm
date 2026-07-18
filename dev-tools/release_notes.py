@@ -109,6 +109,20 @@ if __name__ == "__main__":
             print(f"Unresolved issue: {issue['number']:5d} {issue['state']:10s} {issue_link(issue)}", file=sys.stderr)
         sys.exit(1)
 
+    IGNORED_LABELS = {"github_actions", "skip-changelog"}
+
+    ignored = [
+        issue for issue in issues
+        if any(l["name"] in IGNORED_LABELS for l in issue["labels"])
+    ]
+    if ignored:
+        print(f"Ignoring {len(ignored)} issue(s) with excluded labels ({', '.join(IGNORED_LABELS)}):", file=sys.stderr)
+        for issue in ignored:
+            matched = [l["name"] for l in issue["labels"] if l["name"] in IGNORED_LABELS]
+            print(f"  #{issue['number']} [{', '.join(matched)}] - {issue['title']}", file=sys.stderr)
+
+    issues = [issue for issue in issues if issue not in ignored]
+
     # Group issues by labels, assigning each issue to only its first label
     # to avoid duplicates when an issue has multiple labels
     issues_by_label = {}
