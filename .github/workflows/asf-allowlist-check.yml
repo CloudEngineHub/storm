@@ -22,7 +22,7 @@ on:
   # .github/** would stay "Expected — waiting for status" and be blocked forever.
   pull_request:
   push:
-    branches: [ "master", "2.x" ]
+    branches: [ "master" ]
     paths:
       - ".github/**"
 
