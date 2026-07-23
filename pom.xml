@@ -142,7 +142,7 @@
         <caffeine.version>3.2.4</caffeine.version>
         <jakarta-jaxb-version>4.0.5</jakarta-jaxb-version>
         <jakarta-activation-version>2.0.1</jakarta-activation-version>
-        <jakarta-jaxws-version>3.1.0</jakarta-jaxws-version>
+        <jakarta-jaxws-version>4.0.0</jakarta-jaxws-version>
         <jaxb-version>2.3.1</jaxb-version>
         <rocksdb-jni-version>10.10.1.1</rocksdb-jni-version>
         <json-smart.version>2.6.0</json-smart.version>
