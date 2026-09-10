@@ -440,6 +440,8 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
     private final TimeCacheMap<String, WritableByteChannel> uploaders;
     private final BlobStore blobStore;
     private final TopoCache topoCache;
+    //When a dependency blob was first seen unreferenced by any topology, only used by the cleanup pass.
+    private final Map<String, Long> orphanedDependencyKeysDetectedMs = new HashMap<>();
     @SuppressWarnings("deprecation")
     private final TimeCacheMap<String, BufferInputStream> blobDownloaders;
     @SuppressWarnings("deprecation")
@@ -775,8 +777,18 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
 
     public static int getVersionForKey(String key, NimbusInfo nimbusInfo,
         CuratorFramework zkClient) throws KeyNotFoundException {
+        return getVersionForKey(key, nimbusInfo, zkClient, true);
+    }
+
+    /**
+     * Get the version to register the copy of a blob held by a nimbus under.
+     *
+     * @see KeySequenceNumber#getKeySequenceNumber(CuratorFramework, boolean)
+     */
+    public static int getVersionForKey(String key, NimbusInfo nimbusInfo,
+        CuratorFramework zkClient, boolean mayCreateKey) throws KeyNotFoundException {
         KeySequenceNumber kseq = new KeySequenceNumber(key, nimbusInfo);
-        return kseq.getKeySequenceNumber(zkClient);
+        return kseq.getKeySequenceNumber(zkClient, mayCreateKey);
     }
 
     private static StormTopology readStormTopology(String topoId, TopoCache tc) throws KeyNotFoundException, AuthorizationException,
@@ -3096,6 +3108,45 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
     }
 
     /**
+     * Remove the dependency blobs that no topology has referred to for longer than the inbox jar expiration.
+     *
+     * <p>{@link #rmDependencyBlobsInTopology} only runs in the pass that cleans up the owning topology, and a dependency
+     * blob key carries no topology id, so a blob that outlives that pass can never be traced back to it. That happens
+     * when a submission fails after its dependencies were uploaded, or when another nimbus still holds a copy of the blob
+     * and it is downloaded back after it was removed here. This sweep reclaims those.
+     *
+     * <p>Only keys that are provably unique to one topology are considered: an older client that finds a shareable key
+     * in the store does not upload it again but refers to it, so such a key may be about to be used. A client uploads the
+     * dependencies before it submits the topology, so a key is only removed once it has been seen unreferenced for
+     * {@link DaemonConfig#NIMBUS_INBOX_JAR_EXPIRATION_SECS}, the time nimbus gives an uploaded topology jar to be
+     * submitted. When a key was first seen unreferenced is only kept in memory, so a new leader starts the wait over.
+     *
+     * @param referenced the dependency blob keys referenced by topologies that are not being cleaned up
+     */
+    @VisibleForTesting
+    void sweepOrphanedDependencyBlobs(Set<String> referenced) {
+        try {
+            long graceMs = TimeUnit.SECONDS.toMillis(
+                ObjectReader.getInt(conf.get(DaemonConfig.NIMBUS_INBOX_JAR_EXPIRATION_SECS), 3600));
+            long nowMs = Time.currentTimeMillis();
+            Set<String> orphaned = blobStore.filterAndListKeys(
+                key -> isProvablyUniqueDependencyKey(key) && !referenced.contains(key) ? key : null);
+            //Forget the keys that are gone or referenced again, so that being orphaned later waits the full time again.
+            orphanedDependencyKeysDetectedMs.keySet().retainAll(orphaned);
+            for (String key : orphaned) {
+                long unreferencedMs = nowMs - orphanedDependencyKeysDetectedMs.computeIfAbsent(key, k -> nowMs);
+                if (unreferencedMs >= graceMs) {
+                    LOG.info("Removing dependency blob {}, no topology has referred to it for {} ms", key, unreferencedMs);
+                    rmBlobKey(blobStore, key, stormClusterState);
+                    orphanedDependencyKeysDetectedMs.remove(key);
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("Could not sweep the dependency blobs that no topology refers to", e);
+        }
+    }
+
+    /**
      * Cleanup topologies and Jars.
      */
     @VisibleForTesting
@@ -3132,6 +3183,12 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
                 rmTopologyKeys(topoId);
                 heartbeatsCache.removeTopo(topoId);
                 idToExecutors.getAndUpdate(new Dissoc<>(topoId));
+            }
+
+            //Catches the dependency blobs that outlived the pass that cleaned up their topology. Without knowing the
+            //references nothing can be told to be unused, so nothing is swept then.
+            if (stillReferenced != null) {
+                sweepOrphanedDependencyBlobs(stillReferenced);
             }
 
             long cleanupDurationMs = Time.deltaMs(cleanupStartMs);
@@ -4378,7 +4435,9 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
             BlobStore store = blobStore;
             NimbusInfo ni = nimbusHostPortInfo;
             if (store instanceof LocalFsBlobStore) {
-                state.setupBlob(key, ni, getVersionForKey(key, ni, zkClient));
+                //A non-leader only registers its copy of a key the leader created. If zookeeper does not know the key
+                //any more it was deleted while the copy was downloaded, and registering it would bring it back.
+                state.setupBlob(key, ni, getVersionForKey(key, ni, zkClient, isLeader()));
             }
             LOG.debug("Created state in zookeeper {} {} {}", state, store, ni);
         } catch (KeyNotFoundException e) {

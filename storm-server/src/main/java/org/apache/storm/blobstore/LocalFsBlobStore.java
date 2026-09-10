@@ -139,11 +139,23 @@ public class LocalFsBlobStore extends BlobStore {
         LOG.debug("Creating list of key entries for blobstore inside zookeeper {} local {}", activeKeys, activeLocalKeys);
         for (String key : activeLocalKeys) {
             try {
-                state.setupBlob(key, nimbusInfo, getVersionForKey(key, nimbusInfo, zkClient));
+                state.setupBlob(key, nimbusInfo, getVersionForKey(key, nimbusInfo, zkClient, false));
             } catch (KeyNotFoundException e) {
                 // invalid key, remove it from blobstore
                 store.deleteBlob(key, NIMBUS_SUBJECT);
             }
+        }
+    }
+
+    /**
+     * Tell whether this nimbus is the leader, which is the only one that may register a key zookeeper does not know.
+     * Without a leader elector there is a single nimbus, which is then the leader.
+     */
+    private boolean isLeader() {
+        try {
+            return leaderElector == null || leaderElector.isLeader();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -216,11 +228,14 @@ public class LocalFsBlobStore extends BlobStore {
         }
         BlobStoreFileOutputStream outputStream = null;
         try {
+            //Taken before anything is written, so that a non-leader downloading a key that was deleted meanwhile is
+            //refused without leaving a copy behind.
+            int version = getVersionForKey(key, this.nimbusInfo, zkClient, isLeader());
             outputStream = new BlobStoreFileOutputStream(fbs.write(META_PREFIX + key, true));
             outputStream.write(Utils.thriftSerialize(meta));
             outputStream.close();
             outputStream = null;
-            this.stormClusterState.setupBlob(key, this.nimbusInfo, getVersionForKey(key, this.nimbusInfo, zkClient));
+            this.stormClusterState.setupBlob(key, this.nimbusInfo, version);
             return new BlobStoreFileOutputStream(fbs.write(DATA_PREFIX + key, true));
         } catch (IOException e) {
             throw new RuntimeException(e);

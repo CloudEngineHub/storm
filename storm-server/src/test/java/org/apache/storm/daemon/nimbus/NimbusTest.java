@@ -39,6 +39,7 @@ import org.apache.storm.Config;
 import org.apache.storm.DaemonConfig;
 import org.apache.storm.blobstore.BlobStore;
 import org.apache.storm.blobstore.BlobStoreAclHandler;
+import org.apache.storm.blobstore.KeyFilter;
 import org.apache.storm.blobstore.KeySequenceNumber;
 import org.apache.storm.blobstore.LocalFsBlobStore;
 import org.apache.storm.cluster.IStormClusterState;
@@ -93,6 +94,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -265,11 +267,25 @@ class NimbusTest {
     @Test
     void testCreateStateInZookeeperWhenKeyNotFoundHandlesException() throws Exception {
         try (MockedConstruction<KeySequenceNumber> keySequenceNumber = mockConstruction(KeySequenceNumber.class, (mock, context) ->
-                when(mock.getKeySequenceNumber(any())).thenThrow(new KeyNotFoundException("Failed to setup blob")))) {
+                when(mock.getKeySequenceNumber(any(), anyBoolean())).thenThrow(new KeyNotFoundException("Failed to setup blob")))) {
             nimbus.createStateInZookeeper(BLOB_FILE_KEY);
 
-            verify(keySequenceNumber.constructed().get(0)).getKeySequenceNumber(any());
+            verify(keySequenceNumber.constructed().get(0)).getKeySequenceNumber(any(), anyBoolean());
             verify(stormClusterState, never()).setupBlob(eq(BLOB_FILE_KEY), eq(nimbusInfo), any());
+        }
+    }
+
+    @Test
+    void testCreateStateInZookeeperOnlyLetsTheLeaderRegisterAKeyZookeeperDoesNotKnow() throws Exception {
+        try (MockedConstruction<KeySequenceNumber> keySequenceNumber = mockConstruction(KeySequenceNumber.class)) {
+            when(leaderElector.isLeader()).thenReturn(false);
+            nimbus.createStateInZookeeper(BLOB_FILE_KEY);
+            when(leaderElector.isLeader()).thenReturn(true);
+            nimbus.createStateInZookeeper(BLOB_FILE_KEY);
+
+            // a non-leader registering a key zookeeper does not know would bring back a key that was deleted
+            verify(keySequenceNumber.constructed().get(0)).getKeySequenceNumber(any(), eq(false));
+            verify(keySequenceNumber.constructed().get(1)).getKeySequenceNumber(any(), eq(true));
         }
     }
 
@@ -573,6 +589,114 @@ class NimbusTest {
         verify(store).deleteBlob(eq(UNIQUE_JAR_KEY), any());
         // while the reference of the topology that could be read is honoured
         verify(store, never()).deleteBlob(eq(LEGACY_ARTIFACT_KEY), any());
+    }
+
+    /**
+     * Make the blob store mock list exactly these keys.
+     */
+    private static void storeKeys(BlobStore store, String... keys) {
+        when(store.filterAndListKeys(any())).thenAnswer(invocation -> {
+            KeyFilter<?> filter = invocation.getArgument(0);
+            Set<Object> filtered = new HashSet<>();
+            for (String key : keys) {
+                Object result = filter.filter(key);
+                if (result != null) {
+                    filtered.add(result);
+                }
+            }
+            return filtered;
+        });
+    }
+
+    @Test
+    void doCleanupSweepsADependencyBlobNoTopologyRefersToOnceTheInboxJarExpirationHasPassed() throws Exception {
+        try (Time.SimulatedTime ignored = new Time.SimulatedTime()) {
+            BlobStore store = mock(BlobStore.class);
+            IStormClusterState state = mock(IStormClusterState.class);
+            when(store.storedTopoIds()).thenReturn(Set.of());
+            when(state.activeStorms()).thenReturn(List.of());
+            // outlived the pass that cleaned up its topology, e.g. because it was downloaded back from another nimbus
+            storeKeys(store, UNIQUE_JAR_KEY);
+            Nimbus nimbus = cleanupNimbus(store, state);
+
+            nimbus.doCleanup();
+            // one second short of the default nimbus.inbox.jar.expiration.secs, a submission may still be under way
+            Time.advanceTimeSecs(3599);
+            nimbus.doCleanup();
+            verify(store, never()).deleteBlob(eq(UNIQUE_JAR_KEY), any());
+
+            Time.advanceTimeSecs(1);
+            nimbus.doCleanup();
+            verify(store).deleteBlob(eq(UNIQUE_JAR_KEY), any());
+        }
+    }
+
+    @Test
+    void doCleanupNeverSweepsADependencyBlobThatIsReferencedOrCouldBeShared() throws Exception {
+        try (Time.SimulatedTime ignored = new Time.SimulatedTime()) {
+            BlobStore store = mock(BlobStore.class);
+            IStormClusterState state = mock(IStormClusterState.class);
+            when(store.storedTopoIds()).thenReturn(Set.of("live-topo"));
+            when(state.activeStorms()).thenReturn(List.of("live-topo"));
+            storeTopology(store, "live-topo", List.of(UNIQUE_JAR_KEY), List.of());
+            // nothing refers to the legacy key, but an older client that finds it in the store refers to it without
+            // uploading it again, so it may be about to be used
+            storeKeys(store, UNIQUE_JAR_KEY, LEGACY_ARTIFACT_KEY);
+            Nimbus nimbus = cleanupNimbus(store, state);
+
+            nimbus.doCleanup();
+            Time.advanceTimeSecs(3600);
+            nimbus.doCleanup();
+
+            verify(store, never()).deleteBlob(eq(UNIQUE_JAR_KEY), any());
+            verify(store, never()).deleteBlob(eq(LEGACY_ARTIFACT_KEY), any());
+        }
+    }
+
+    @Test
+    void doCleanupDoesNotSweepDependencyBlobsWhenTheReferencesCannotBeRead() throws Exception {
+        try (Time.SimulatedTime ignored = new Time.SimulatedTime()) {
+            BlobStore store = mock(BlobStore.class);
+            IStormClusterState state = mock(IStormClusterState.class);
+            when(store.storedTopoIds()).thenReturn(Set.of("live-topo"));
+            when(state.activeStorms()).thenReturn(List.of("live-topo"));
+            // the live topology's code blob cannot be read, so it may be the one referring to the key
+            when(store.readBlob(eq(ConfigUtils.masterStormCodeKey("live-topo")), any()))
+                .thenThrow(new IOException("blob store is unhappy"));
+            storeKeys(store, UNIQUE_JAR_KEY);
+            Nimbus nimbus = cleanupNimbus(store, state);
+
+            nimbus.doCleanup();
+            Time.advanceTimeSecs(3600);
+            nimbus.doCleanup();
+
+            verify(store, never()).deleteBlob(eq(UNIQUE_JAR_KEY), any());
+        }
+    }
+
+    @Test
+    void aDependencyBlobThatComesBackAfterItsTopologyWasCleanedUpIsRemovedAgain() throws Exception {
+        try (Time.SimulatedTime ignored = new Time.SimulatedTime()) {
+            BlobStore store = mock(BlobStore.class);
+            IStormClusterState state = mock(IStormClusterState.class);
+            when(store.storedTopoIds()).thenReturn(Set.of("dead-topo"));
+            when(state.activeStorms()).thenReturn(List.of());
+            storeTopology(store, "dead-topo", List.of(UNIQUE_JAR_KEY), List.of());
+            Nimbus nimbus = cleanupNimbus(store, state);
+
+            nimbus.doCleanup();
+            verify(store).deleteBlob(eq(UNIQUE_JAR_KEY), any());
+
+            // the topology is gone for good, but another nimbus still had a copy of the blob and it was downloaded
+            // back, so the pass that knew which topology it belonged to is over
+            when(store.storedTopoIds()).thenReturn(Set.of());
+            storeKeys(store, UNIQUE_JAR_KEY);
+            nimbus.doCleanup();
+            Time.advanceTimeSecs(3600);
+            nimbus.doCleanup();
+
+            verify(store, times(2)).deleteBlob(eq(UNIQUE_JAR_KEY), any());
+        }
     }
 
     @Test
