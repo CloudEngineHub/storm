@@ -19,7 +19,10 @@
 package org.apache.storm.blobstore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import org.apache.storm.generated.KeyNotFoundException;
 import org.apache.storm.nimbus.NimbusInfo;
 import org.apache.storm.shade.org.apache.curator.framework.CuratorFramework;
 import org.apache.storm.shade.org.apache.curator.framework.CuratorFrameworkFactory;
@@ -29,52 +32,65 @@ import org.junit.jupiter.api.Test;
 
 class KeySequenceNumberTest {
     private static final String KEY = "dep-lib-11111111-1111-1111-1111-111111111111.jar";
+    private static final String KEY_PATH = "/blobstore/" + KEY;
+    private static final String MAX_SEQUENCE_PATH = "/blobstoremaxkeysequencenumber/" + KEY;
     private static final NimbusInfo LEADER = new NimbusInfo("nimbus-1", 6627, false);
-    private static final NimbusInfo PEER = new NimbusInfo("nimbus-0", 6627, false);
+    private static final NimbusInfo PEER = new NimbusInfo("nimbus-2", 6627, false);
 
     /**
-     * Replays the blob store state changes behind the nimbus log reported on STORM-3871, where a dependency blob that
-     * was removed when its topology was cleaned up showed up on the leader again, registered at version 0 and then 1.
+     * Replays the blob store state changes behind the nimbus logs reported on STORM-3871. A non-leader that downloaded
+     * a blob while the leader deleted it registered the key again as new, and every other nimbus, the leader included,
+     * then downloaded the blob back from it.
      */
     @Test
-    void aBlobThatAnotherNimbusRegistersAgainAfterItWasDeletedIsRecreatedOnTheLeader() throws Exception {
+    void aNonLeaderCannotRegisterAKeyAgainThatWasDeletedWhileItDownloadedIt() throws Exception {
         try (InProcessZookeeper zk = new InProcessZookeeper();
-             CuratorFramework zkClient = CuratorFrameworkFactory.newClient("localhost:" + zk.getPort(),
-                 new ExponentialBackoffRetry(1000, 3))) {
-            zkClient.start();
-
+             CuratorFramework zkClient = newClient(zk)) {
             // the client uploads the dependency: createBlob, then createStateInZookeeper when it closes the stream
-            assertEquals(1, register(zkClient, LEADER));
-            assertEquals(2, register(zkClient, LEADER));
+            assertEquals(1, register(zkClient, LEADER, true));
+            assertEquals(2, register(zkClient, LEADER, true));
 
             // the topology is cleaned up and the leader deletes the blob, as LocalFsBlobStore#deleteBlob does
-            zkClient.delete().deletingChildrenIfNeeded().forPath("/blobstore/" + KEY);
-            zkClient.delete().deletingChildrenIfNeeded().forPath("/blobstoremaxkeysequencenumber/" + KEY);
+            zkClient.delete().deletingChildrenIfNeeded().forPath(KEY_PATH);
+            zkClient.delete().deletingChildrenIfNeeded().forPath(MAX_SEQUENCE_PATH);
 
-            // another nimbus, which still has a copy, registers the key again as if it were new
-            assertEquals(1, register(zkClient, PEER));
-
-            // a request for the key makes the leader download it back from that nimbus: createBlob, then
-            // createStateInZookeeper, which are the set-path lines ending in -0 and -1 in the report
-            assertEquals(0, register(zkClient, LEADER));
-            assertEquals(1, register(zkClient, LEADER));
+            // the non-leader finishes its download and would register the key as if it were new
+            assertThrows(KeyNotFoundException.class, () -> register(zkClient, PEER, false));
+            assertNull(zkClient.checkExists().forPath(KEY_PATH));
+            assertNull(zkClient.checkExists().forPath(MAX_SEQUENCE_PATH));
         }
+    }
+
+    @Test
+    void aNonLeaderStillRegistersItsCopyOfAKeyTheLeaderCreated() throws Exception {
+        try (InProcessZookeeper zk = new InProcessZookeeper();
+             CuratorFramework zkClient = newClient(zk)) {
+            assertEquals(1, register(zkClient, LEADER, true));
+
+            assertEquals(0, register(zkClient, PEER, false));
+        }
+    }
+
+    private static CuratorFramework newClient(InProcessZookeeper zk) {
+        CuratorFramework zkClient = CuratorFrameworkFactory.newClient("localhost:" + zk.getPort(),
+            new ExponentialBackoffRetry(1000, 3));
+        zkClient.start();
+        return zkClient;
     }
 
     /**
      * Do what IStormClusterState#setupBlob does with the version KeySequenceNumber hands out.
      */
-    private static int register(CuratorFramework zkClient, NimbusInfo nimbus) throws Exception {
-        int version = new KeySequenceNumber(KEY, nimbus).getKeySequenceNumber(zkClient);
-        String parent = "/blobstore/" + KEY;
-        if (zkClient.checkExists().forPath(parent) != null) {
-            for (String child : zkClient.getChildren().forPath(parent)) {
+    private static int register(CuratorFramework zkClient, NimbusInfo nimbus, boolean mayCreateKey) throws Exception {
+        int version = new KeySequenceNumber(KEY, nimbus).getKeySequenceNumber(zkClient, mayCreateKey);
+        if (zkClient.checkExists().forPath(KEY_PATH) != null) {
+            for (String child : zkClient.getChildren().forPath(KEY_PATH)) {
                 if (child.startsWith(nimbus.toHostPortString())) {
-                    zkClient.delete().forPath(parent + "/" + child);
+                    zkClient.delete().forPath(KEY_PATH + "/" + child);
                 }
             }
         }
-        zkClient.create().creatingParentsIfNeeded().forPath(parent + "/" + nimbus.toHostPortString() + "-" + version);
+        zkClient.create().creatingParentsIfNeeded().forPath(KEY_PATH + "/" + nimbus.toHostPortString() + "-" + version);
         return version;
     }
 }

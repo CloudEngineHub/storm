@@ -777,8 +777,18 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
 
     public static int getVersionForKey(String key, NimbusInfo nimbusInfo,
         CuratorFramework zkClient) throws KeyNotFoundException {
+        return getVersionForKey(key, nimbusInfo, zkClient, true);
+    }
+
+    /**
+     * Get the version to register the copy of a blob held by a nimbus under.
+     *
+     * @see KeySequenceNumber#getKeySequenceNumber(CuratorFramework, boolean)
+     */
+    public static int getVersionForKey(String key, NimbusInfo nimbusInfo,
+        CuratorFramework zkClient, boolean mayCreateKey) throws KeyNotFoundException {
         KeySequenceNumber kseq = new KeySequenceNumber(key, nimbusInfo);
-        return kseq.getKeySequenceNumber(zkClient);
+        return kseq.getKeySequenceNumber(zkClient, mayCreateKey);
     }
 
     private static StormTopology readStormTopology(String topoId, TopoCache tc) throws KeyNotFoundException, AuthorizationException,
@@ -4425,7 +4435,9 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
             BlobStore store = blobStore;
             NimbusInfo ni = nimbusHostPortInfo;
             if (store instanceof LocalFsBlobStore) {
-                state.setupBlob(key, ni, getVersionForKey(key, ni, zkClient));
+                //A non-leader only registers its copy of a key the leader created. If zookeeper does not know the key
+                //any more it was deleted while the copy was downloaded, and registering it would bring it back.
+                state.setupBlob(key, ni, getVersionForKey(key, ni, zkClient, isLeader()));
             }
             LOG.debug("Created state in zookeeper {} {} {}", state, store, ni);
         } catch (KeyNotFoundException e) {

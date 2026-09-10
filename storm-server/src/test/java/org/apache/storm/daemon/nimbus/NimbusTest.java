@@ -94,6 +94,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -266,11 +267,25 @@ class NimbusTest {
     @Test
     void testCreateStateInZookeeperWhenKeyNotFoundHandlesException() throws Exception {
         try (MockedConstruction<KeySequenceNumber> keySequenceNumber = mockConstruction(KeySequenceNumber.class, (mock, context) ->
-                when(mock.getKeySequenceNumber(any())).thenThrow(new KeyNotFoundException("Failed to setup blob")))) {
+                when(mock.getKeySequenceNumber(any(), anyBoolean())).thenThrow(new KeyNotFoundException("Failed to setup blob")))) {
             nimbus.createStateInZookeeper(BLOB_FILE_KEY);
 
-            verify(keySequenceNumber.constructed().get(0)).getKeySequenceNumber(any());
+            verify(keySequenceNumber.constructed().get(0)).getKeySequenceNumber(any(), anyBoolean());
             verify(stormClusterState, never()).setupBlob(eq(BLOB_FILE_KEY), eq(nimbusInfo), any());
+        }
+    }
+
+    @Test
+    void testCreateStateInZookeeperOnlyLetsTheLeaderRegisterAKeyZookeeperDoesNotKnow() throws Exception {
+        try (MockedConstruction<KeySequenceNumber> keySequenceNumber = mockConstruction(KeySequenceNumber.class)) {
+            when(leaderElector.isLeader()).thenReturn(false);
+            nimbus.createStateInZookeeper(BLOB_FILE_KEY);
+            when(leaderElector.isLeader()).thenReturn(true);
+            nimbus.createStateInZookeeper(BLOB_FILE_KEY);
+
+            // a non-leader registering a key zookeeper does not know would bring back a key that was deleted
+            verify(keySequenceNumber.constructed().get(0)).getKeySequenceNumber(any(), eq(false));
+            verify(keySequenceNumber.constructed().get(1)).getKeySequenceNumber(any(), eq(true));
         }
     }
 
