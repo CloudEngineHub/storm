@@ -270,6 +270,10 @@ public class DaemonConfig implements Validated {
      * it takes to delete an inbox jar file is going to be somewhat more than NIMBUS_CLEANUP_INBOX_JAR_EXPIRATION_SECS
      * (depending on how often NIMBUS_CLEANUP_FREQ_SECS is set to).
      *
+     * <p>This is also how long a dependency blob uploaded by a client may go without any topology referring to it
+     * before nimbus deletes it from the blob store, which covers the time between uploading the dependencies of a
+     * topology and submitting it.
+     *
      * @see #NIMBUS_CLEANUP_INBOX_FREQ_SECS
      */
     @IsInteger
