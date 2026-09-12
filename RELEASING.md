@@ -61,7 +61,7 @@ In this way, you create a new release line and then you can create PATCH version
 
 1. Checkout to the branch to be released.
 
-2. Run `mvn release:prepare -P dist,rat,externals,examples` followed by `mvn release:perform -P dist,rat,externals,examples`.
+2. <a id="rc-maven-release"></a>Run `mvn release:prepare -P dist,rat,externals,examples` followed by `mvn release:perform -P dist,rat,externals,examples`.
    This will create all the artifacts that will eventually be available in maven central. This step may seem simple,
    but a lot can go wrong (mainly flaky tests). Note that this will create and push two commits with the commit message
    starting with "[maven-release-plugin]" and it will also create and publish a git tag, e.g. `v2.8.1`. Note: the full build can take up to 30 minutes to complete.
@@ -76,7 +76,7 @@ In this way, you create a new release line and then you can create PATCH version
    Nexus UI under **Staging Repositories** at https://repository.apache.org/#stagingRepositories. You will need this
    ID in the vote email template.
 
-4. Checkout to the git tag that was published by Step 2 above, e.g. `git checkout tags/v2.8.1 -b v2.8.1`.
+4. <a id="rc-checkout-tag"></a>Checkout to the git tag that was published by [the Maven release](#rc-maven-release) above, e.g. `git checkout tags/v2.8.1 -b v2.8.1`.
    Then build and package the distributions:
 
    ```bash
@@ -85,7 +85,7 @@ In this way, you create a new release line and then you can create PATCH version
    cd storm-dist/source && mvn package && cd ../..
    ```
 
-5. Generate checksums for the *.tar.gz and *.zip distribution files, e.g.
+5. <a id="rc-checksums"></a>Generate checksums for the *.tar.gz and *.zip distribution files, e.g.
 
    > **macOS note:** use `shasum -a 512` in place of `sha512sum`.
 
@@ -112,11 +112,11 @@ In this way, you create a new release line and then you can create PATCH version
    > omits them. Both must be signed, checksummed and staged for the release candidate.
    > See [Storm lite distribution](#storm-lite-distribution) below.
 
-6. Create a directory in the dist svn repo for the release candidate: https://dist.apache.org/repos/dist/dev/storm/apache-storm-x.x.x-rcx
+6. <a id="rc-svn-dir"></a>Create a directory in the dist svn repo for the release candidate: https://dist.apache.org/repos/dist/dev/storm/apache-storm-x.x.x-rcx
 
 7. Before generating the release notes, please double check if all merged pull requests for the version being released are assigned the milestone in question. They won't be placed in the release notes otherwise.
 
-8. Run `dev-tools/release_notes.py` for the release version, piping the output to a RELEASE_NOTES.html file. Move that file to the svn release directory, sign it, and generate checksums, e.g.
+8. <a id="rc-release-notes"></a>Run `dev-tools/release_notes.py` for the release version, piping the output to a RELEASE_NOTES.html file. Move that file to the svn release directory, sign it, and generate checksums, e.g.
 
    ```bash
    export GITHUB_TOKEN=<your-github-pat>
@@ -137,7 +137,7 @@ In this way, you create a new release line and then you can create PATCH version
    - Click on the milestone you want to create release notes for.
    - Look at the URL in your browser. It will look like this: `https://github.com/apache/storm/milestone/40`, where the last number is the milestone ID.
 
-9. Move the release files from steps 4, 5 and 8 to the svn directory from Step 6. Example of the set of files:
+9. Move the release files from the [tag checkout](#rc-checkout-tag), [checksums](#rc-checksums) and [release notes](#rc-release-notes) steps to the [dist svn directory](#rc-svn-dir). Example of the set of files:
 
    ```
    apache-storm-2.8.3-src.tar.gz         apache-storm-2.8.3-src.zip         apache-storm-2.8.3.tar.gz         apache-storm-2.8.3.zip         RELEASE_NOTES.html
@@ -271,17 +271,15 @@ from Maven Central (or an internal mirror configured in `settings.xml`).
 
 5. Update `doap_Storm.rdf` with the new release version.
 
-6. Announce the new release to dev@storm.apache.org, user@storm.apache.org, and announce@apache.org. You will need to use your @apache.org email to do this.
+6. Delete any outdated releases from the https://dist.apache.org/repos/dist/release/storm/ repository. See [when to archive](https://www.apache.org/legal/release-policy.html#when-to-archive).
 
-7. Delete any outdated releases from the https://dist.apache.org/repos/dist/release/storm/ repository. See [when to archive](https://www.apache.org/legal/release-policy.html#when-to-archive).
+7. Delete any outdated releases from the storm-site releases directory, and republish the site.
 
-8. Delete any outdated releases from the storm-site releases directory, and republish the site.
+8. Create a release on [GitHub](https://github.com/apache/storm/releases). Generate the release notes with the GitHub tooling.
 
-9. Create a release on [GitHub](https://github.com/apache/storm/releases). Generate the release notes with the GitHub tooling.
+9. Create a new release for [Storm Docker](https://github.com/apache/storm-docker). Example of a version release [here](https://github.com/apache/storm-docker/commit/177a1534bf910c2271845f4eaedef7c040559fbc). After that is done, a PR to [docker-library](https://github.com/docker-library/official-images) must be submitted, so that the new docker-storm version is officially released. Example of such a PR is [here](https://github.com/docker-library/official-images/pull/21525#issuecomment-4526751672).
 
-10. Create a new release for [Storm Docker](https://github.com/apache/storm-docker). Example of a version release [here](https://github.com/apache/storm-docker/commit/177a1534bf910c2271845f4eaedef7c040559fbc). After that is done, a PR to [docker-library](https://github.com/docker-library/official-images) must be submitted, so that the new docker-storm version is officially released. Example of such a PR is [here](https://github.com/docker-library/official-images/pull/21525#issuecomment-4526751672).
-
-11. Post, promote, celebrate. ;) Announcement email can be sent to announce@apache.org using the following template:
+10. Post, promote, celebrate. ;) Announce the new release to dev@storm.apache.org, user@storm.apache.org, and announce@apache.org (you must use your @apache.org email to post to announce@apache.org), using the following template:
 
     ```text
     Subject: [ANNOUNCE] Apache Storm [VERSION] Released
@@ -322,6 +320,10 @@ from Maven Central (or an internal mirror configured in `settings.xml`).
     [2] https://github.com/apache/storm/issues
     ```
 
+> **Don't forget:** when the release was cut from a release branch, update `master` with the
+> new version afterwards — bump `master` to the appropriate next development (`-SNAPSHOT`) version
+> and bring over any release-branch changes that also belong on `master`.
+
 ## Cleaning up if the vote fails
 
 1. Go to https://repository.apache.org and drop the staging repository.
@@ -349,8 +351,8 @@ Below is a checklist that one could do to review a release candidate.
 Please note this list is not exhaustive and only includes some of the common steps. Feel free to add your own tests.
 
 1. Verify files such as *.asc, *.sha512; some scripts are available under `dev-tools/rc` to help with it;
-2. Build Apache Storm source code and run unit tests, create an Apache Storm distribution;
-3. Set up a standalone cluster using apache-storm-xxx.zip, apache-storm-xxx.tar.gz, the Apache Storm distribution created from step 2, separately;
+2. <a id="vote-build-distribution"></a>Build Apache Storm source code and run unit tests, create an Apache Storm distribution;
+3. Set up a standalone cluster using apache-storm-xxx.zip, apache-storm-xxx.tar.gz, the Apache Storm distribution created in [the build step](#vote-build-distribution), separately;
 4. Launch WordCountTopology and ThroughputVsLatency topology and check logs, UI metrics, etc;
 5. Test basic UI functionalities such as jstack, heap dump, deactivate, activate, rebalance, change log level, log search, kill topology;
 6. Test basic CLI such as kill, list, deactivate, activate, rebalance, etc.
